@@ -1,0 +1,18 @@
+{
+  "name": "opencode-adal-auth",
+  "version": "0.2.2",
+  "description": "Magpie/OpenCode provider using the locally authenticated AdaL CLI",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": { ".": "./index.mjs", "./server": "./index.mjs" },
+  "files": ["index.mjs", "runtime.mjs", "models.mjs", "usage.mjs", "README.md", "README.zh-CN.md", "LICENSE"],
+  "scripts": { "test": "node --test", "test:live": "node scripts/live-check.mjs", "test:quota": "node scripts/quota-check.mjs", "test:magpie": "node scripts/magpie-check.mjs" },
+  "keywords": ["opencode", "opencode-plugin", "provider", "auth", "adal", "magpie"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/raythunder/magpie_adal.git" },
+  "homepage": "https://github.com/raythunder/magpie_adal#readme",
+  "bugs": { "url": "https://github.com/raythunder/magpie_adal/issues" },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "engines": { "node": ">=22" },
+  "magpie": { "icon": "https://adal.sylph.ai/icon.png?0f5796f5bbb763e7", "maxConcurrency": 1 }
+}
