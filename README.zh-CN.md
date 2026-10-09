@@ -1,8 +1,8 @@
 # Adal
 
-[English](./README.md) · [npm](https://www.npmjs.com/package/opencode-adal-auth) · [GitHub](https://github.com/raythunder/magpie_adal)
+[English](./README.md) · [npm](https://www.npmjs.com/package/magpie-adal) · [GitHub](https://github.com/raythunder/magpie_adal)
 
-通过本地已安装、已登录的 [AdaL CLI](https://adal.sylph.ai)，在 [Magpie](https://usemagpie.ai) 中使用 AdaL 的模型。npm 包名：`opencode-adal-auth`；供应商 id：`adal`。
+通过本地已安装、已登录的 [AdaL CLI](https://adal.sylph.ai)，在 [Magpie](https://usemagpie.ai) 中使用 AdaL 的模型。npm 包名：`magpie-adal`；供应商 id：`adal`。
 
 插件采用 Magpie 支持的 OpenCode v1 格式，没有运行时依赖，也不用额外管理 HTTP 服务。登录凭据由 AdaL 自己保管，Magpie 只保存本地连接标记。
 
@@ -13,13 +13,13 @@
 在 Magpie 中打开「插件 → 添加插件」，输入：
 
 ```text
-opencode-adal-auth
+magpie-adal
 ```
 
 也可以使用 Magpie CLI：
 
 ```sh
-magpie plugin add opencode-adal-auth
+magpie plugin add magpie-adal
 magpie plugin login adal
 magpie provider test adal default
 ```

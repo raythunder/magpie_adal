@@ -1,8 +1,8 @@
 # Adal
 
-[简体中文](./README.zh-CN.md) · [npm](https://www.npmjs.com/package/opencode-adal-auth) · [GitHub](https://github.com/raythunder/magpie_adal)
+[简体中文](./README.zh-CN.md) · [npm](https://www.npmjs.com/package/magpie-adal) · [GitHub](https://github.com/raythunder/magpie_adal)
 
-A [Magpie](https://usemagpie.ai) provider plugin that uses your locally installed, signed-in [AdaL CLI](https://adal.sylph.ai). Package: `opencode-adal-auth`. Provider id: `adal`.
+A [Magpie](https://usemagpie.ai) provider plugin that uses your locally installed, signed-in [AdaL CLI](https://adal.sylph.ai). Package: `magpie-adal`. Provider id: `adal`.
 
 It uses Magpie's supported OpenCode v1 plugin format, with no runtime dependencies and no additional HTTP server to manage. AdaL keeps its own credentials; Magpie stores only a local connection marker.
 
@@ -13,13 +13,13 @@ Install AdaL CLI **1.9.0 or newer**, run `adal` in a terminal, and complete its 
 In Magpie, open **Plugins → Add plugin** and enter:
 
 ```text
-opencode-adal-auth
+magpie-adal
 ```
 
 Or use Magpie's CLI:
 
 ```sh
-magpie plugin add opencode-adal-auth
+magpie plugin add magpie-adal
 magpie plugin login adal
 magpie provider test adal default
 ```
