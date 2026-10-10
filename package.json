@@ -1,6 +1,6 @@
 {
   "name": "magpie-adal",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Magpie provider plugin using the locally authenticated AdaL CLI",
   "type": "module",
   "main": "./index.mjs",

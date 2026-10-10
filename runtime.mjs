@@ -29,8 +29,8 @@ export function cliPath(options = {}) {
   return options.cliPath || process.env.ADAL_RUNTIME_PATH || (existsSync(local) ? local : "adal");
 }
 
-// SDK protocol v1, verified against AdaL 1.8.1's sdkRuntime source.
-export async function* run(options, { model, prompt, system, signal, probe = false, usage = false }) {
+// SDK protocol v1, verified against AdaL 1.9.0's sdkRuntime source.
+export async function* run(options, { model, prompt, system, signal, probe = false, usage = false, externalTools = [] }) {
   signal?.throwIfAborted();
   if (model && model !== "default" && !Object.hasOwn(await models(), model)) throw Object.assign(new Error(`Unknown AdaL model: ${model}. Run adal to refresh its model catalog.`), { status: 400 });
   const workspace = await mkdtemp(join(tmpdir(), "magpie-adal-"));
@@ -71,13 +71,17 @@ export async function* run(options, { model, prompt, system, signal, probe = fal
     const send = (message) => child.stdin.write(JSON.stringify(message) + "\n");
     send({
       type: "initialize", protocol_version: 1, workspace,
-      permission_mode: "default", prompt_file: promptFile,
+      permission_mode: "default", can_use_tool: true, prompt_file: promptFile,
       // shortcut: AdaL 1.8.1 ignores empty allowlists; replace this unmatched name when the SDK supports an empty set.
       enabled_default_tools: ["__magpie_external_tools_only__"],
     });
     let ready = false;
     let complete = false;
     let size = 0;
+    let denied = false;
+    let repaired = false;
+    const pendingCalls = new Map();
+    const deniedCalls = new Set();
     const query = () => send({ type: "query", input: prompt });
     for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
       signal?.throwIfAborted();
@@ -114,15 +118,56 @@ export async function* run(options, { model, prompt, system, signal, probe = fal
         if (event.subtype !== "success") throw new Error(event.error || "AdaL model switch failed");
         query();
       } else if (event.type === "control_request") {
-        send({ type: "control_response", request_id: event.request_id, response: { behavior: "deny" } });
-        throw new Error("AdaL attempted an internal tool; only the calling agent may execute tools");
+        const request = event.request;
+        send({ type: "control_response", request_id: event.request_id, response: {
+          behavior: "deny", message: "AdaL-native tools are disabled. Return tool calls as JSON for the external agent instead.",
+        } });
+        if (request?.subtype !== "can_use_tool") throw new Error("Unsupported AdaL control request");
+        if (externalTools.includes(request.tool_name)) {
+          // Deny AdaL execution, then hand the proposed call to the external agent.
+          send({ type: "cancel" });
+          complete = true;
+          yield { type: "external.tool_call", name: request.tool_name, args: request.input };
+          yield { type: "command.completed" };
+          break;
+        }
+        denied = true;
+        deniedCalls.add(request.tool_call_id);
       } else if (event.type === "tool.started") {
-        throw new Error("AdaL started an internal tool despite the disabled tool allowlist");
+        pendingCalls.set(event.toolCallId, event);
+      } else if (event.type === "tool.completed") {
+        if (deniedCalls.has(event.toolCallId) && ["failed", "cancelled"].includes(event.status)) {
+          pendingCalls.delete(event.toolCallId);
+          continue;
+        }
+        const call = pendingCalls.get(event.toolCallId);
+        const output = typeof event.result === "string" ? event.result : event.result?.output;
+        // shortcut: AdaL 1.9 has no typed lookup error; replace this prefix check when the SDK provides one.
+        if (!call || (event.name && event.name !== call.name) || event.status !== "failed" || typeof output !== "string" || !output.startsWith(`No tool found matching '${call.name}'.`)) throw new Error("AdaL bypassed the tool permission gate; unexpected native tool result");
+        pendingCalls.delete(event.toolCallId);
+        if (!externalTools.includes(call.name)) { denied = true; continue; }
+        send({ type: "cancel" });
+        complete = true;
+        yield { type: "external.tool_call", name: call.name, args: call.args };
+        yield { type: "command.completed" };
+        break;
       } else if (event.type === "command.completed") {
+        if (denied) {
+          if (repaired) throw new Error("AdaL could not produce a model-only reply after its native tool was denied");
+          repaired = true;
+          denied = false;
+          pendingCalls.clear();
+          deniedCalls.clear();
+          send({ type: "query", input: 'The previous AdaL-native tool attempt did not execute. Answer the original conversation and keep following its system/developer messages, using only the provided context. Never call AdaL-native tools or claim they ran. If the original request contained tools, return ONLY {"content":"answer or null","tool_calls":[{"name":"client-provided function name","arguments":{}}]}, including an empty tool_calls array for a text answer. Respect the original tool_choice and parallel_tool_calls. If the original request had no tools, answer as plain text.' });
+          yield { type: "external.retry" };
+          continue;
+        }
+        if (pendingCalls.size) throw new Error("AdaL bypassed the tool permission gate; native lookup was not confirmed");
         complete = true;
         yield event;
         break;
       } else {
+        if (event.type === "assistant.message.completed" && event.message?.content) denied = false;
         yield event;
       }
     }

@@ -82,11 +82,11 @@ async function adalFetch(options, input, init = {}) {
   const created = Math.floor(Date.now() / 1000);
   const streamController = new AbortController();
   const runtimeSignal = signal ? AbortSignal.any([signal, streamController.signal]) : streamController.signal;
-  const events = run(options, { model: body.model, prompt, system: SYSTEM, signal: runtimeSignal });
+  const events = run(options, { model: body.model, prompt, system: SYSTEM, signal: runtimeSignal, externalTools: (body.tools || []).map((tool) => tool.function.name) });
   let first;
   try {
     // Wait for initialization/model selection before sending HTTP 200.
-    do { first = await events.next(); } while (!first.done && !["assistant.delta", "assistant.message.completed", "command.completed"].includes(first.value.type));
+    do { first = await events.next(); } while (!first.done && !["assistant.delta", "assistant.message.completed", "external.tool_call", "command.completed"].includes(first.value.type));
     if (first.done) throw new Error("AdaL returned no answer");
   } catch (error) {
     await events.return();
@@ -96,13 +96,20 @@ async function adalFetch(options, input, init = {}) {
   async function* output() {
     let text = "";
     let sent = "";
+    let retryPrefix = "";
     for (let step = first; !step.done; step = await events.next()) {
       const event = step.value;
       if (event.type === "assistant.delta") {
         text += event.text || "";
         if (!body.tools?.length && event.text) { sent += event.text; yield { content: event.text }; }
       } else if (event.type === "assistant.message.completed" && typeof event.message?.content === "string") {
-        text = event.message.content;
+        text = retryPrefix + event.message.content;
+      } else if (event.type === "external.retry") {
+        retryPrefix = body.tools?.length || !sent ? "" : `${sent}\n\n`;
+        text = retryPrefix;
+        if (retryPrefix) { sent = retryPrefix; yield { content: "\n\n" }; }
+      } else if (event.type === "external.tool_call") {
+        text = JSON.stringify({ content: text || null, tool_calls: [{ name: event.name, arguments: event.args }] });
       } else if (event.type === "command.completed") {
         if (!text) throw new Error("AdaL returned an empty answer");
         const message = parseReply(text, body);
