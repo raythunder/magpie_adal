@@ -1,195 +1,201 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { chmod } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import plugin, { _internal } from "../index.mjs";
+import { test, after } from "node:test";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { _internal } from "../index.mjs";
+import { setup, fakeProxy } from "../fixtures/testing.mjs";
 
-const cliPath = fileURLToPath(new URL("../fixtures/fake-adal.mjs", import.meta.url));
-await chmod(cliPath, 0o755);
-const options = { cliPath, timeoutMs: 1000 };
-const url = "http://127.0.0.1/adal/v1/chat/completions";
-const request = (content, extra = {}) => ({ method: "POST", body: JSON.stringify({ model: "default", messages: [{ role: "user", content }], ...extra }) });
+const env = await setup();
+const cloud = await fakeProxy();
+process.env.ADAL_PROXY_URL = cloud.url;
+after(async () => { await cloud.close(); await env.close(); });
+const request = (model = "default", extra = {}) => ({ method: "POST", body: JSON.stringify({ model, messages: [{ role: "user", content: "你好" }], ...extra }) });
+const url = path => "http://127.0.0.1/adal/v1" + path;
+const call = (path = "/messages", init = request(), options = env.options) => _internal.adalFetch(options, url(path), init);
 
-function parseSSE(text) {
-  return text.split("\n").filter((line) => line.startsWith("data: ") && line !== "data: [DONE]").map((line) => JSON.parse(line.slice(6)));
-}
-
-test("local sign-in checks the runtime without spending a model query", async () => {
-  const hooks = await plugin.server({}, options);
-  const flow = await hooks.auth.methods[0].authorize();
-  const result = await flow.callback();
-  assert.equal(result.type, "success");
-  const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: result.access }));
-  assert.equal(typeof loader.fetch, "function");
+test("authenticated subprocess sends native cloud request, original defaults and identity", async () => {
+  const response = await call();
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /你好 world/);
+  const sent = cloud.requests.at(-1);
+  assert.equal(sent.url, "/proxy/v1/messages");
+  assert.equal(sent.headers.authorization, "Bearer fixture-token");
+  assert.equal(sent.headers["x-provider"], "anthropic");
+  assert.equal(sent.headers["x-target-url"], "https://api.anthropic.com");
+  assert.equal(sent.headers["x-client-version"], "1.10.3");
+  assert.equal(sent.headers["x-content-encoding"], "base64");
+  assert.equal(sent.body.model, "claude-test");
+  assert.equal(sent.body.max_tokens, 128000);
+  assert.equal(sent.body.system, undefined);
+  assert.deepEqual(sent.body.messages, [{ role: "user", content: "你好" }]);
 });
 
-test("real subprocess produces standard non-streaming chat response", async () => {
-  const response = await _internal.adalFetch(options, url, request("hello"));
-  assert.equal(response.status, 200);
+test("native non-streaming replies retain upstream token usage", async () => {
+  const response = await call("/messages", request("default", { stream: false }));
   const body = await response.json();
-  assert.equal(body.choices[0].message.content, "你好 world");
-  assert.equal(body.choices[0].finish_reason, "stop");
-  assert.equal(body.model, "default");
+  assert.equal(body.content[0].text, "你好 world");
+  assert.deepEqual(body.usage, { input_tokens: 8, output_tokens: 4 });
+  assert.equal(cloud.requests.at(-1).body.stream, true);
 });
 
-test("SSE sends Unicode once, a finish reason and DONE", async () => {
-  const response = await _internal.adalFetch(options, url, request("hello", { stream: true }));
-  assert.equal(response.headers.get("content-type"), "text/event-stream");
-  const text = await response.text();
-  const chunks = parseSSE(text);
-  assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || "").join(""), "你好 world");
-  assert.equal(chunks.at(-1).choices[0].finish_reason, "stop");
-  assert.ok(text.endsWith("data: [DONE]\n\n"));
+test("an omitted stream flag means a complete native response", async () => {
+  const response = await call();
+  assert.equal(response.headers.get("content-type"), "application/json");
+  assert.equal((await response.json()).content[0].text, "你好 world");
 });
 
-test("SSE translates external tool calls without executing them", async () => {
-  const response = await _internal.adalFetch(options, url, request("read a file", {
-    stream: true, tools: [{ type: "function", function: { name: "read_file" } }], tool_choice: "required",
-  }));
-  const chunks = parseSSE(await response.text());
-  const call = chunks.flatMap((chunk) => chunk.choices[0].delta.tool_calls || [])[0];
-  assert.equal(call.function.name, "read_file");
-  assert.equal(call.index, 0);
-  assert.deepEqual(JSON.parse(call.function.arguments), { path: "a.txt" });
-  assert.equal(chunks.at(-1).choices[0].finish_reason, "tool_calls");
+test("Request inputs preserve native beta headers without forwarding caller credentials", async () => {
+  const input = new Request(url("/messages"), { ...request(), headers: { "anthropic-beta": "test-beta", "x-api-key": "caller-secret", Authorization: "Bearer caller-secret" } });
+  await (await _internal.adalFetch(env.options, input)).text();
+  const sent = cloud.requests.at(-1);
+  assert.equal(sent.headers["anthropic-beta"], "test-beta");
+  assert.equal(sent.headers["x-api-key"], "dummy");
+  assert.equal(sent.headers.authorization, "Bearer fixture-token");
 });
 
-test("unknown models fail before AdaL can silently select its default", async () => {
-  const response = await _internal.adalFetch(options, url, request("hello", { model: "invalid-model" }));
-  assert.equal(response.status, 400);
-  assert.match((await response.json()).error.message, /Unknown AdaL model/);
-});
-
-test("auth rejection is visible to Magpie", async () => {
-  const response = await _internal.adalFetch(options, url, request("auth-error"));
-  assert.equal(response.status, 401);
-  assert.equal(response.headers.get("X-Magpie-Sign-In"), "expired");
-});
-
-test("native external calls are denied in AdaL and returned for the caller to execute", async () => {
-  const response = await _internal.adalFetch(options, url, request("native-bash", {
-    tools: [{ type: "function", function: { name: "bash" } }], tool_choice: "required",
-  }));
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.equal(body.choices[0].finish_reason, "tool_calls");
-  assert.equal(body.choices[0].message.tool_calls[0].function.name, "bash");
-  assert.deepEqual(JSON.parse(body.choices[0].message.tool_calls[0].function.arguments), { command: "printf EXTERNAL_ONLY" });
-});
-
-test("native tool bridging preserves streamed preamble and produces valid SSE", async () => {
-  const response = await _internal.adalFetch(options, url, request("native-bash-prefix", {
-    stream: true, tools: [{ type: "function", function: { name: "bash" } }], tool_choice: "required",
-  }));
-  const chunks = parseSSE(await response.text());
-  assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || "").join(""), "I will check using the external tool.");
-  assert.equal(chunks.at(-1).choices[0].finish_reason, "tool_calls");
-});
-
-test("native argument validation remains required", async () => {
-  const response = await _internal.adalFetch(options, url, request("native-invalid-args", {
-    tools: [{ type: "function", function: { name: "bash" } }], tool_choice: "required",
-  }));
-  assert.equal(response.status, 502);
-  assert.match((await response.json()).error.message, /arguments/i);
-});
-
-test("AdaL-only tools are denied without discarding the eventual answer", async () => {
-  const response = await _internal.adalFetch(options, url, request("internal-tool"));
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).choices[0].message.content, "Internal tool denied");
-});
-
-test("unregistered native calls are bridged only after confirming failed lookup", async () => {
-  const response = await _internal.adalFetch(options, url, request("unregistered-bash", {
-    tools: [{ type: "function", function: { name: "bash" } }], tool_choice: "required",
-  }));
-  assert.equal(response.status, 200);
-  const call = (await response.json()).choices[0].message.tool_calls[0];
-  assert.equal(call.function.name, "bash");
-  assert.deepEqual(JSON.parse(call.function.arguments), { command: "printf EXTERNAL_ONLY" });
-});
-
-test("execution, a different lookup error, or mismatched IDs cannot be bridged", async () => {
-  for (const content of ["native-execution-success", "wrong-lookup", "wrong-lookup-id"]) {
-    const response = await _internal.adalFetch(options, url, request(content, {
-      tools: [{ type: "function", function: { name: "bash" } }],
-    }));
-    assert.equal(response.status, 502);
-    assert.match((await response.json()).error.message, /permission gate/i);
-  }
-});
-
-test("denied native turns resume with a model-only reply and valid text SSE", async () => {
-  const response = await _internal.adalFetch(options, url, request("internal-prefix", { stream: true }));
-  const chunks = parseSSE(await response.text());
-  assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || "").join(""), "Checking.\n\nInternal tool denied");
-  assert.equal(chunks.at(-1).choices[0].finish_reason, "stop");
-});
-
-test("native start markers around denied approval do not imply execution", async () => {
-  for (const content of ["internal-start-before", "internal-start-after"]) {
-    const response = await _internal.adalFetch(options, url, request(content));
+test("all native APIs use their original target and model route", async () => {
+  for (const [path, model, target, upstream] of [
+    ["/responses", "openai-test", "https://api.openai.com/v1", "/proxy/responses"],
+    ["/chat/completions", "kimi-test", "https://api.moonshot.ai/v1", "/proxy/chat/completions"],
+    ["/models/google-test:streamGenerateContent?alt=sse", "google-test", "https://generativelanguage.googleapis.com", "/proxy/v1beta/models/gemini-test:streamGenerateContent?alt=sse"],
+  ]) {
+    const response = await call(path, request(model, { input: "hi", contents: [{ role: "user", parts: [{ text: "hi" }] }], stream: true }));
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).choices[0].message.content, "Internal tool denied");
+    assert.match(await response.text(), /你好 world/);
+    assert.equal(cloud.requests.at(-1).headers["x-target-url"], target);
+    assert.equal(cloud.requests.at(-1).url, upstream);
   }
 });
 
-test("a hallucinated unregistered name is repaired without being passed to the caller", async () => {
-  const response = await _internal.adalFetch(options, url, request("unknown-native", {
-    tools: [{ type: "function", function: { name: "bash" } }], tool_choice: "required",
-  }));
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).choices[0].message.tool_calls[0].function.name, "bash");
+test("tool schemas, signatures and tool results remain native and unmodified", async () => {
+  const messages = [{ role: "assistant", content: [{ type: "thinking", thinking: "reason", signature: "signed" }, { type: "tool_use", id: "call", name: "echo", input: { text: "你好" } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "call", content: "你好" }] }];
+  const tools = [{ name: "echo", input_schema: { type: "object" } }];
+  await (await call("/messages", request("default", { messages, tools, tool_choice: { type: "auto" } }))).text();
+  assert.deepEqual(cloud.requests.at(-1).body.messages, messages);
+  assert.deepEqual(cloud.requests.at(-1).body.tools, tools);
 });
 
-test("repeated native denials stop after one repair attempt", async () => {
-  const response = await _internal.adalFetch(options, url, request("internal-repeat"));
-  assert.equal(response.status, 502);
-  assert.match((await response.json()).error.message, /model-only reply/i);
+test("invalid input and unknown models fail before any cloud request", async () => {
+  const count = cloud.requests.length;
+  for (const init of [{ method: "POST", body: "not JSON" }, request("unknown"), request("chatgpt-test")]) {
+    assert.equal((await call("/messages", init)).status, 400);
+  }
+  assert.equal((await call("/auth/context")).status, 400);
+  assert.equal((await call("/messages", { method: "GET" })).status, 400);
+  assert.equal((await call("/responses", request())).status, 400);
+  assert.equal(cloud.requests.length, count);
 });
 
-test("unapproved native results never become a successful external call", async () => {
-  const response = await _internal.adalFetch(options, url, request("ungated-tool"));
-  assert.equal(response.status, 502);
-  assert.match((await response.json()).error.message, /internal tool|permission gate/i);
+test("BYOAK and failed model selection cannot silently change the billing/model path", async () => {
+  const count = cloud.requests.length;
+  for (const failure of ["byoak", "wrong-model"]) {
+    process.env.ADAL_FIXTURE_FAILURE = failure;
+    try { assert.equal((await call()).status, 400); }
+    finally { delete process.env.ADAL_FIXTURE_FAILURE; }
+  }
+  assert.equal(cloud.requests.length, count);
 });
 
-test("unexpected process exit is an error", async () => {
-  const response = await _internal.adalFetch(options, url, request("exit"));
-  assert.equal(response.status, 502);
+test("SDK authentication failures lapse the marker without exposing credentials", async () => {
+  process.env.ADAL_FIXTURE_FAILURE = "auth";
+  try {
+    const response = await call();
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get("X-Magpie-Sign-In"), "expired");
+    assert.doesNotMatch(await response.text(), /fixture-token/);
+  } finally { delete process.env.ADAL_FIXTURE_FAILURE; }
 });
 
-test("timeouts terminate the child and return 504", async () => {
-  const response = await _internal.adalFetch(options, url, request("hang"));
-  assert.equal(response.status, 504);
+test("refreshed local credentials are read for each request", async () => {
+  const path = join(env.home, ".adal/adal_oauth_creds.json");
+  const original = await readFile(path, "utf8");
+  try {
+    await writeFile(path, JSON.stringify({ access_token: "renewed-fixture-token" }));
+    await (await call()).text();
+    assert.equal(cloud.requests.at(-1).headers.authorization, "Bearer renewed-fixture-token");
+  } finally { await writeFile(path, original); }
 });
 
-test("aborted requests stop the child instead of waiting for the timeout", async () => {
+test("upstream status and sign-in state remain visible", async () => {
+  for (const status of [401, 402, 429, 503]) {
+    cloud.respond = (_req, response) => response.writeHead(status, { "content-type": "application/json", "retry-after": "3" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: "unavailable" } }));
+    try {
+      const response = await call();
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("retry-after"), "3");
+      assert.equal(response.headers.get("X-Magpie-Sign-In"), status === 401 ? "expired" : "kept");
+      assert.match(await response.text(), /unavailable/);
+    } finally { cloud.respond = null; }
+  }
+});
+
+test("truncated native streams fail rather than looking complete", async () => {
+  cloud.respond = (_req, response) => response.writeHead(200, { "content-type": "text/event-stream" }).end('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n');
+  try { await assert.rejects((await call("/messages", request("default", { stream: true }))).text(), /before completion/); }
+  finally { cloud.respond = null; }
+});
+
+test("streamed upstream errors become native non-streaming errors with status", async () => {
+  cloud.respond = (_req, response) => response.writeHead(200, { "content-type": "text/event-stream" }).end('data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n');
+  try { const response = await call(); assert.equal(response.status, 529); assert.match(await response.text(), /busy/); }
+  finally { cloud.respond = null; }
+});
+
+test("redirects cannot forward the credential to a different destination", async () => {
+  cloud.respond = (_req, response) => response.writeHead(307, { location: "https://example.com" }).end();
+  try { const response = await call(); assert.equal(response.status, 502); assert.match(await response.text(), /redirect/); }
+  finally { cloud.respond = null; }
+});
+
+test("oversized requests are rejected before sending credentials or starting a query", async () => {
+  const count = cloud.requests.length;
+  const response = await call("/messages", request("default", { messages: [{ role: "user", content: "x".repeat(4 * 1024 * 1024) }] }));
+  assert.equal(response.status, 413);
+  assert.equal(cloud.requests.length, count);
+});
+
+test("stream cancellation closes the upstream connection", async () => {
+  let close;
+  const disconnected = new Promise(resolve => { close = resolve; });
+  cloud.respond = (req, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n');
+    response.on("close", close);
+  };
+  try {
+    const reader = (await call("/messages", request("default", { stream: true }))).body.getReader();
+    await reader.read();
+    await reader.cancel();
+    await disconnected;
+  } finally { cloud.respond = null; }
+});
+
+test("request abort stops a stalled initialization", async () => {
+  process.env.ADAL_FIXTURE_FAILURE = "hang";
   const controller = new AbortController();
-  const promise = _internal.adalFetch({ ...options, timeoutMs: 30000 }, url, { ...request("hang"), signal: controller.signal });
-  setTimeout(() => controller.abort(), 100);
-  await assert.rejects(promise, { name: "AbortError" });
+  try {
+    const pending = call("/messages", { ...request(), signal: controller.signal });
+    setTimeout(() => controller.abort(), 100);
+    await assert.rejects(pending, { name: "AbortError" });
+  } finally { delete process.env.ADAL_FIXTURE_FAILURE; }
 });
 
-test("cancelling the response body terminates a stalled streaming process", async () => {
-  const response = await _internal.adalFetch({ ...options, timeoutMs: 30000 }, url, request("stream-hang", { stream: true }));
-  const reader = response.body.getReader();
-  await reader.read();
-  const chunk = await reader.read();
-  const text = new TextDecoder().decode(chunk.value);
-  const pid = Number(parseSSE(text)[0].choices[0].delta.content.slice(4));
-  await reader.cancel();
-  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+test("the request timeout remains active while reading the cloud response", async () => {
+  cloud.respond = (_req, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n');
+  };
+  try {
+    const response = await call("/messages", request("default", { stream: true }), { ...env.options, timeoutMs: 1000 });
+    await assert.rejects(response.text(), /timed out|abort/i);
+  } finally { cloud.respond = null; }
 });
 
-test("invalid JSON and unsupported content return 400 before spawning", async () => {
-  const response = await _internal.adalFetch({ cliPath: "/does/not/exist" }, url, { body: "not JSON" });
-  assert.equal(response.status, 400);
-});
-
-test("missing executable gives actionable failure", async () => {
-  const response = await _internal.adalFetch({ cliPath: "/does/not/exist" }, url, request("hello"));
+test("initialization timeout returns 504 and missing executables are actionable", async () => {
+  process.env.ADAL_FIXTURE_FAILURE = "hang";
+  try { assert.equal((await call("/messages", request(), { ...env.options, timeoutMs: 1000 })).status, 504); }
+  finally { delete process.env.ADAL_FIXTURE_FAILURE; }
+  const response = await call("/messages", request(), { cliPath: "/does/not/exist" });
   assert.equal(response.status, 502);
-  assert.match((await response.json()).error.message, /cliPath|Install/);
+  assert.match(await response.text(), /cliPath|Install/);
 });

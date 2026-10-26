@@ -1,0 +1,10 @@
+{
+  "default_model": "anthropic-test",
+  "models": [
+    { "key": "anthropic-test", "provider": "anthropic", "model_client": "AnthropicAPIClient", "display_name": "Test Claude", "supports_vision": true, "is_thinking_model": true, "config_options": { "effort": ["low", "medium"], "effort_path": "output_config.effort" }, "model_kwargs": { "model": "claude-test", "max_input_tokens": 1000000, "max_tokens": 128000, "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": { "effort": "medium" }, "stream": true } },
+    { "key": "openai-test", "provider": "openai", "model_client": "OpenAIClient", "display_name": "Test GPT", "is_thinking_model": true, "model_kwargs": { "model": "gpt-test", "max_input_tokens": 1000000, "max_output_tokens": 128000, "reasoning": { "effort": "medium", "summary": "auto" }, "stream": true } },
+    { "key": "google-test", "provider": "google", "model_client": "GoogleGenAIClient", "display_name": "Test Gemini", "supports_vision": true, "model_kwargs": { "model": "gemini-test", "max_input_tokens": 1000000, "max_output_tokens": 65536, "thinking_config": { "thinking_level": "medium", "include_thoughts": true }, "stream": true } },
+    { "key": "kimi-test", "provider": "kimi", "model_client": "KimiClient", "display_name": "Test Kimi", "model_kwargs": { "model": "kimi-test", "max_tokens": 32000, "stream": true } },
+    { "key": "chatgpt-test", "provider": "chatgpt_web", "model_client": "ChatGPTWebClient", "model_kwargs": { "model": "gpt-test" } }
+  ]
+}

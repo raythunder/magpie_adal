@@ -1,11 +1,11 @@
 {
   "name": "magpie-adal",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Magpie provider plugin using the locally authenticated AdaL CLI",
   "type": "module",
   "main": "./index.mjs",
   "exports": { ".": "./index.mjs", "./server": "./index.mjs" },
-  "files": ["index.mjs", "runtime.mjs", "models.mjs", "usage.mjs", "README.md", "README.zh-CN.md", "LICENSE"],
+  "files": ["index.mjs", "runtime.mjs", "proxy.mjs", "responses.mjs", "models.mjs", "usage.mjs", "README.md", "README.zh-CN.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md", "LICENSE"],
   "scripts": { "test": "node --test", "test:live": "node scripts/live-check.mjs", "test:quota": "node scripts/quota-check.mjs", "test:magpie": "node scripts/magpie-check.mjs" },
   "keywords": ["magpie", "magpie-plugin", "provider", "auth", "adal"],
   "license": "MIT",

@@ -1,4 +1,4 @@
-import { run } from "./runtime.mjs";
+import { withRuntime } from "./runtime.mjs";
 
 // Same fields and balance units as AdaL 1.9.0's /usage dialog.
 export function usageOf(data) {
@@ -26,10 +26,7 @@ export async function usage(options, getAuth) {
   const auth = await getAuth();
   if (auth?.type !== "oauth" || auth.access !== "local-cli") return { error: "AdaL CLI is not connected", signIn: "kept" };
   try {
-    for await (const event of run(options, { usage: true })) {
-      if (event.type === "usage") return usageOf(event.data);
-    }
-    throw new Error("AdaL returned no quota data");
+    return await withRuntime(options, {}, async ({ get }) => usageOf(await get("/auth/usage")));
   } catch (error) {
     return { error: error.message, signIn: error.signIn || "kept" };
   }

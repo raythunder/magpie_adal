@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { test, mock } from "node:test";
-import { chmod } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { test, mock, after } from "node:test";
+import { setup } from "../fixtures/testing.mjs";
 import { usageOf } from "../usage.mjs";
 import plugin from "../index.mjs";
 
-const cliPath = fileURLToPath(new URL("../fixtures/fake-adal.mjs", import.meta.url));
-await chmod(cliPath, 0o755);
+const env = await setup();
+const { cliPath } = env.options;
+after(() => env.close());
 const auth = async () => ({ type: "oauth", access: "local-cli" });
 
 const sample = {
